@@ -40,7 +40,7 @@ enable = true                               # 是否启用插件
 command = "短剧"                            # 触发插件的命令前缀
 
 # 群聊白名单，只在这些群聊中生效
-whitelist_groups = ["38791621365@chatroom", "34587307323@chatroom"]
+whitelist_groups = ["*"]
 
 # 搜索基础URL列表，用于查询短剧资源
 # 程序会依次尝试列表中的URL，直到找到可用的站点
