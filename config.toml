@@ -1,0 +1,24 @@
+[DuanjuSpider]
+enable = true
+
+# 短剧搜索命令
+command = "短剧"
+
+# 群聊白名单，只在这些群聊中生效
+whitelist_groups = ["*"]
+
+# 搜索基础URL列表，用于查询短剧资源
+# 程序会依次尝试列表中的URL，直到找到可用的站点
+base_urls = [
+    "https://a80.35240.com/search.php",
+    "https://b.21410.com/search.php"
+]
+
+# 短链接列表，用于解析获取最新的可用站点
+# 程序会自动解析这些短链，并将解析结果添加到base_urls中
+short_urls = [
+    "A80.CC",
+    "A20.CC",
+    "E50.CC",
+    "47C.CC"
+]
