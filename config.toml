@@ -5,7 +5,10 @@ enable = true
 command = "短剧"
 
 # 群聊白名单，只在这些群聊中生效
-whitelist_groups = ["*"]
+whitelist_groups = ["38791621365@chatroom", "34587307323@chatroom","51862038391@chatroom"]
+
+# 每次搜索显示的最大结果数
+max_results = 10
 
 # 搜索基础URL列表，用于查询短剧资源
 # 程序会依次尝试列表中的URL，直到找到可用的站点

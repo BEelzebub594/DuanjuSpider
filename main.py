@@ -14,13 +14,18 @@ from WechatAPI import WechatAPIClient
 class DuanjuSpider(PluginBase):
     description = "短剧搜索插件"
     author = "BEelzebub"
-    version = "1.0.0"
+    version = "1.1.0"
 
     def __init__(self):
         super().__init__()
         self.plugin_dir = os.path.dirname(__file__)
         config_path = os.path.join(self.plugin_dir, "config.toml")
         self.urls_file = os.path.join(self.plugin_dir, "search_urls.json")
+        
+        # 搜索结果缓存，格式为 {用户ID: {'results': [...], 'keyword': '...', 'timestamp': ...}}
+        self.search_cache = {}
+        # 缓存过期时间（秒）
+        self.cache_expire_time = 300  # 5分钟
         
         try:
             with open(config_path, "rb") as f:
@@ -29,6 +34,7 @@ class DuanjuSpider(PluginBase):
             self.enable = config.get("enable", False)
             self.command = config.get("command", "短剧")
             self.whitelist_groups = config.get("whitelist_groups", [])
+            self.max_results = config.get("max_results", 10)  # 最大显示结果数
             
             # 从config.toml中读取URL配置
             config_base_urls = config.get("base_urls", ["https://a80.35240.com/search.php", "https://b.21410.com/search.php"])
@@ -46,6 +52,7 @@ class DuanjuSpider(PluginBase):
             self.base_urls = ["https://a80.35240.com/search.php", "https://b.21410.com/search.php"]
             self.short_urls = ["A80.CC", "A20.CC", "E50.CC", "47C.CC"]
             self.whitelist_groups = []
+            self.max_results = 10
 
     def load_urls(self, config_base_urls, config_short_urls):
         """从JSON文件加载URL列表，如果不存在则使用config.toml中的配置创建默认值"""
@@ -83,6 +90,21 @@ class DuanjuSpider(PluginBase):
         except Exception as e:
             logger.error(f"短剧插件异步初始化失败: {str(e)}")
             self.enable = False
+            
+    def _clean_expired_cache(self):
+        """清理过期的缓存"""
+        current_time = asyncio.get_event_loop().time()
+        expired_keys = []
+        
+        for key, cache_data in self.search_cache.items():
+            if current_time - cache_data['timestamp'] > self.cache_expire_time:
+                expired_keys.append(key)
+                
+        for key in expired_keys:
+            del self.search_cache[key]
+            
+        if expired_keys:
+            logger.info(f"[短剧插件] 已清理 {len(expired_keys)} 条过期缓存")
 
     async def resolve_short_url(self, short_url, headers, max_retries=3):
         """解析短链接获取实际URL，处理HTTP 302跳转"""
@@ -188,34 +210,124 @@ class DuanjuSpider(PluginBase):
 
     @on_text_message(priority=30)
     async def handle_text(self, bot: WechatAPIClient, message: dict):
+        """处理用户消息"""
         if not self.enable:
             return True
+            
         content = str(message["Content"]).strip()
         chat_id = message["FromWxid"]
         sender = message["SenderWxid"]
+        
+        # 检查是否为群聊
         if not message["IsGroup"]:
             return True
+            
+        # 检查群组白名单
         if chat_id not in self.whitelist_groups:
             return True
-        if not content.startswith(self.command):
-            return True
-        drama_name = content[len(self.command):].strip()
-        if not drama_name:
-            await bot.send_at_message(chat_id, "请输入要搜索的剧名", [sender])
-            return False
-        try:
-            results = await self.search_drama(drama_name)
-            if not results:
-                await bot.send_at_message(chat_id, f"未找到《{drama_name}》相关资源", [sender])
+            
+        # 定义用户缓存键（群ID+发送者ID）
+        cache_key = f"{chat_id}_{sender}"
+        
+        # 清理过期缓存
+        self._clean_expired_cache()
+        
+        # 检查是否为获取详情的请求（格式：短剧# 编号）
+        if content.startswith(f"{self.command}#"):
+            logger.info(f"[短剧插件] 收到详情请求: {content}")
+            
+            # 提取编号
+            index_str = content[len(self.command)+1:].strip()
+            logger.info(f"[短剧插件] 解析到编号: {index_str}")
+            
+            # 验证输入是否为数字
+            if not index_str.isdigit():
+                logger.warning(f"[短剧插件] 无效的编号格式: {index_str}")
+                await bot.send_at_message(chat_id, f"请输入正确的编号，如：{self.command}# 1", [sender])
                 return False
-            response = f'《{drama_name}》搜索结果：\n\n'
-            for result in results:
-                response += f'标题：{result["title"]}\n网盘链接：{result["pan_link"]}\n\n'
-            await bot.send_at_message(chat_id, response.strip(), [sender])
-        except Exception as e:
-            logger.error(f"短剧搜索异常: {str(e)}")
-            await bot.send_at_message(chat_id, f"短剧搜索失败: {str(e)}", [sender])
-        return False
+                
+            index = int(index_str)
+            
+            # 检查该用户是否有缓存的搜索结果
+            if cache_key not in self.search_cache:
+                logger.warning(f"[短剧插件] 用户 {cache_key} 没有缓存的搜索结果")
+                await bot.send_at_message(chat_id, "请先搜索短剧，再获取详情", [sender])
+                return False
+                
+            # 获取缓存结果
+            cached_data = self.search_cache[cache_key]
+            results = cached_data['results']
+            drama_name = cached_data['keyword']
+            logger.info(f"[短剧插件] 获取到缓存结果，关键词: {drama_name}, 结果数: {len(results)}")
+            
+            # 验证编号是否有效
+            if index < 1 or index > len(results):
+                logger.warning(f"[短剧插件] 编号超出范围: {index}, 有效范围: 1-{len(results)}")
+                await bot.send_at_message(chat_id, f"无效的编号，请输入1-{len(results)}之间的数字", [sender])
+                return False
+                
+            # 获取选定的结果
+            selected_result = results[index-1]
+            logger.info(f"[短剧插件] 选择了结果: #{index}, 标题: {selected_result['title']}")
+            
+            # 发送详细信息
+            detail_response = f"《{drama_name}》 - {selected_result['title']}\n"
+            detail_response += f"网盘链接: {selected_result['pan_link']}\n"
+            
+            await bot.send_at_message(chat_id, detail_response, [sender])
+            logger.info(f"[短剧插件] 已发送详情结果")
+            
+            return False
+            
+        # 检查消息是否以命令开头
+        elif content.startswith(self.command):
+            # 提取关键词
+            drama_name = content[len(self.command):].strip()
+            if not drama_name:
+                await bot.send_at_message(chat_id, "请输入要搜索的剧名", [sender])
+                return False
+                
+            # 执行搜索
+            try:
+                logger.info(f"[短剧插件] 收到搜索请求: {drama_name}")
+                results = await self.search_drama(drama_name)
+                
+                if not results:
+                    await bot.send_at_message(chat_id, f"未找到《{drama_name}》相关资源", [sender])
+                    return False
+                    
+                # 缓存结果
+                self.search_cache[cache_key] = {
+                    'results': results,
+                    'keyword': drama_name,
+                    'timestamp': asyncio.get_event_loop().time()
+                }
+                logger.info(f"[短剧插件] 已缓存搜索结果，用户: {cache_key}, 结果数: {len(results)}")
+                
+                # 组装第一步回复内容（只包含标题和编号）
+                max_show = min(len(results), self.max_results)
+                response = f'《{drama_name}》搜索结果：\n\n'
+                
+                for i, result in enumerate(results[:max_show], 1):
+                    response += f'【{i}】{result["title"]}\n'
+                
+                # 如果结果超过最大显示数，添加提示
+                if len(results) > max_show:
+                    response += f"\n还有 {len(results) - max_show} 条结果未显示...\n"
+                
+                # 添加使用详情命令的提示
+                response += f"\n获取网盘链接请发送：{self.command}# 编号 (例如: {self.command}# 1)"
+                
+                await bot.send_at_message(chat_id, response.strip(), [sender])
+                logger.info(f"[短剧插件] 已发送搜索预览结果")
+                
+            except Exception as e:
+                logger.error(f"短剧搜索异常: {str(e)}")
+                await bot.send_at_message(chat_id, f"短剧搜索失败: {str(e)}", [sender])
+                
+            return False
+            
+        return True
 
     async def search_drama(self, keyword):
         logger.info(f'开始搜索短剧: {keyword}')
