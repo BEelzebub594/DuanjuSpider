@@ -5,7 +5,7 @@ enable = true
 command = "短剧"
 
 # 群聊白名单，只在这些群聊中生效
-whitelist_groups = ["38791621365@chatroom", "34587307323@chatroom","51862038391@chatroom"]
+whitelist_groups = [""]
 
 # 每次搜索显示的最大结果数
 max_results = 10
