@@ -5,6 +5,9 @@ import aiohttp
 import random
 import asyncio
 import json
+import requests
+import urllib.parse
+import time
 from loguru import logger
 from bs4 import BeautifulSoup
 from utils.plugin_base import PluginBase
@@ -14,7 +17,7 @@ from WechatAPI import WechatAPIClient
 class DuanjuSpider(PluginBase):
     description = "短剧搜索插件"
     author = "BEelzebub"
-    version = "1.1.0"
+    version = "1.2.0"
 
     def __init__(self):
         super().__init__()
@@ -27,12 +30,16 @@ class DuanjuSpider(PluginBase):
         # 缓存过期时间（秒）
         self.cache_expire_time = 300  # 5分钟
         
+        # 加剧命令
+        self.add_drama_command = "加剧"
+        
         try:
             with open(config_path, "rb") as f:
                 config = tomllib.load(f)
             config = config.get("DuanjuSpider", {})
             self.enable = config.get("enable", False)
             self.command = config.get("command", "短剧")
+            self.add_drama_command = config.get("add_drama_command", "加剧")
             self.whitelist_groups = config.get("whitelist_groups", [])
             self.max_results = config.get("max_results", 10)  # 最大显示结果数
             
@@ -49,6 +56,7 @@ class DuanjuSpider(PluginBase):
             logger.error(f"加载短剧插件配置文件失败: {str(e)}")
             self.enable = False
             self.command = "短剧"
+            self.add_drama_command = "加剧"
             self.base_urls = ["https://a80.35240.com/search.php", "https://b.21410.com/search.php"]
             self.short_urls = ["A80.CC", "A20.CC", "E50.CC", "47C.CC"]
             self.whitelist_groups = []
@@ -208,6 +216,205 @@ class DuanjuSpider(PluginBase):
         except:
             return False
 
+    # 生成评论所需的commentKey
+    def generate_comment_key(self):
+        """
+        生成评论所需的commentKey
+        格式为：当前毫秒级时间戳.随机数(保留12位小数)
+        """
+        # 获取当前毫秒级时间戳
+        timestamp = int(time.time() * 1000)
+        # 生成0-1之间的随机数
+        random_num = random.random()
+        # 拼接为指定格式的字符串
+        comment_key = f"{timestamp}.{str(random_num).split('.')[1][:12]}"
+        return comment_key
+
+    # 获取评论key
+    async def get_comment_key(self):
+        """
+        从页面获取评论所需的key
+        
+        Returns:
+            str: 评论key
+        """
+        if not hasattr(self, 'last_used_domain') or not self.last_used_domain:
+            self.last_used_domain = "https://a80.35240.com"
+            logger.warning(f"未找到可用域名，使用默认域名: {self.last_used_domain}")
+        
+        url = f"{self.last_used_domain}/?id=2"
+        logger.info(f"获取评论key，访问URL: {url}")
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=10) as response:
+                    if response.status != 200:
+                        logger.error(f"获取评论页面失败，状态码: {response.status}")
+                        return None
+                    
+                    html = await response.text()
+                    
+            # 使用正则表达式提取key
+            key_pattern = r'action="[^"]*cmd\.php\?act=cmt&amp;postid=2&amp;key=([a-zA-Z0-9]+)"'
+            key_match = re.search(key_pattern, html)
+            
+            if key_match:
+                key = key_match.group(1)
+                logger.info(f"成功获取评论key: {key}")
+                return key
+            else:
+                # 尝试使用BeautifulSoup解析
+                soup = BeautifulSoup(html, 'html.parser')
+                form = soup.find('form', id='frmSumbit')
+                
+                if form and 'action' in form.attrs:
+                    action_url = form['action']
+                    key_match = re.search(r'key=([a-zA-Z0-9]+)', action_url)
+                    
+                    if key_match:
+                        key = key_match.group(1)
+                        logger.info(f"通过BeautifulSoup获取评论key: {key}")
+                        return key
+                
+                logger.error("未能在页面中找到评论key")
+                return None
+                
+        except Exception as e:
+            logger.error(f"获取评论key时出错: {str(e)}")
+            return None
+
+    # 发送评论请求
+    async def send_comment(self, content):
+        """
+        发送评论请求
+        
+        Args:
+            content: 评论内容
+        
+        Returns:
+            响应结果
+        """
+        # 如果没有可用域名，使用默认域名
+        if not hasattr(self, 'last_used_domain') or not self.last_used_domain:
+            self.last_used_domain = "https://a80.35240.com"
+            logger.warning(f"未找到可用域名，使用默认域名: {self.last_used_domain}")
+        
+        # 获取评论key
+        key = await self.get_comment_key()
+        if not key:
+            return {
+                "success": False,
+                "message": "获取评论key失败"
+            }
+        
+        # 生成commentKey
+        comment_key = self.generate_comment_key()
+        
+        # 请求URL
+        url = f"{self.last_used_domain}/zb_system/cmd.php?act=cmt&postid=2&key={key}"
+        logger.info(f"使用评论URL: {url}")
+        
+        # 请求头
+        headers = {
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Cookie": "timezone=8",
+            "Origin": self.last_used_domain,
+            "Referer": f"{self.last_used_domain}/?id=2",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        
+        # 构建请求数据 - 按照正确的载荷格式
+        data = {
+            "name": "访客",
+            "homepage": "http://undefined",
+            "postid": "2",
+            "content": content,
+            "replyid": "0",
+            "format": "json",
+            "commentKey": comment_key
+        }
+        
+        logger.info(f"发送评论请求数据: {data}")
+        
+        try:
+            # 发送POST请求
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url=url,
+                    headers=headers,
+                    data=data,
+                    timeout=10
+                ) as response:
+                    status = response.status
+                    logger.info(f"评论请求响应状态码: {status}")
+                    
+                    # 获取响应内容
+                    try:
+                        # 尝试解析为JSON
+                        result = await response.json()
+                        logger.info(f"评论请求响应JSON: {result}")
+                        
+                        # 检查响应状态码
+                        if status == 200:
+                            return {
+                                "success": True,
+                                "data": result
+                            }
+                        else:
+                            return {
+                                "success": False,
+                                "message": f"请求失败，状态码: {status}",
+                                "response": result
+                            }
+                    except Exception as e:
+                        # 如果不是JSON，获取文本内容
+                        text = await response.text()
+                        logger.info(f"评论请求响应内容前100字符: {text[:100]}")
+                        
+                        # 检查响应状态码
+                        if status == 200 or status == 302:
+                            # 检查是否包含成功提示
+                            if "评论发表成功" in text or "提交成功" in text or "success" in text.lower():
+                                return {
+                                    "success": True,
+                                    "data": "评论发表成功"
+                                }
+                            else:
+                                # 如果状态码是200，认为可能成功了
+                                if status == 200:
+                                    return {
+                                        "success": True,
+                                        "data": "评论可能已提交，但无法确认结果"
+                                    }
+                                
+                                return {
+                                    "success": False,
+                                    "message": f"评论提交失败，响应内容不包含成功提示",
+                                    "response": text[:200]  # 只返回前200个字符，避免日志过长
+                                }
+                        else:
+                            return {
+                                "success": False,
+                                "message": f"请求失败，状态码: {status}",
+                                "response": text[:200]  # 只返回前200个字符
+                            }
+        except Exception as e:
+            logger.error(f"发送评论请求时出错: {str(e)}")
+            return {
+                "success": False,
+                "message": f"发送请求时出错: {str(e)}"
+            }
+
     @on_text_message(priority=30)
     async def handle_text(self, bot: WechatAPIClient, message: dict):
         """处理用户消息"""
@@ -231,6 +438,53 @@ class DuanjuSpider(PluginBase):
         
         # 清理过期缓存
         self._clean_expired_cache()
+        
+        # 检查是否为加剧请求
+        if content.startswith(self.add_drama_command):
+            logger.info(f"[短剧插件] 收到加剧请求: {content}")
+            
+            # 提取剧名
+            drama_name = content[len(self.add_drama_command):].strip()
+            if not drama_name:
+                await bot.send_at_message(chat_id, "请输入要加入的剧名", [sender])
+                return False
+                
+            # 执行加剧操作
+            try:
+                logger.info(f"[短剧插件] 开始加剧: {drama_name}")
+                result = await self.send_comment(drama_name)
+                
+                # 根据HTTP状态码判断是否成功
+                if isinstance(result, dict) and "status_code" in result:
+                    status_code = result["status_code"]
+                    if status_code == 200 or status_code == 302:
+                        await bot.send_at_message(chat_id, f"加剧成功，请在1天后重新搜索《{drama_name}》", [sender])
+                        logger.info(f"[短剧插件] 加剧成功: {drama_name}")
+                    else:
+                        await bot.send_at_message(chat_id, f"加剧失败: HTTP状态码 {status_code}", [sender])
+                        logger.error(f"[短剧插件] 加剧失败: HTTP状态码 {status_code}")
+                # 根据success字段判断是否成功
+                elif isinstance(result, dict) and "success" in result:
+                    if result["success"]:
+                        await bot.send_at_message(chat_id, f"加剧成功，请在1天后重新搜索《{drama_name}》", [sender])
+                        logger.info(f"[短剧插件] 加剧成功: {drama_name}")
+                    else:
+                        # 如果错误信息包含JSON解析错误，但状态码是200，认为是成功的
+                        error_msg = result.get("message", "")
+                        if "200" in error_msg and ("JSON" in error_msg or "mimetype" in error_msg):
+                            await bot.send_at_message(chat_id, f"加剧成功，请在1天后重新搜索《{drama_name}》", [sender])
+                            logger.info(f"[短剧插件] 加剧成功(忽略JSON错误): {drama_name}")
+                        else:
+                            await bot.send_at_message(chat_id, f"加剧失败: {result.get('message', '未知错误')}", [sender])
+                            logger.error(f"[短剧插件] 加剧失败: {result.get('message', '未知错误')}")
+                else:
+                    await bot.send_at_message(chat_id, f"加剧失败: 返回结果格式异常", [sender])
+                    logger.error(f"[短剧插件] 加剧失败: 返回结果格式异常 {result}")
+            except Exception as e:
+                logger.error(f"加剧操作异常: {str(e)}")
+                await bot.send_at_message(chat_id, f"加剧操作异常: {str(e)}", [sender])
+                
+            return False
         
         # 检查是否为获取详情的请求（格式：短剧# 编号）
         if content.startswith(f"{self.command}#"):
@@ -292,8 +546,13 @@ class DuanjuSpider(PluginBase):
                 logger.info(f"[短剧插件] 收到搜索请求: {drama_name}")
                 results = await self.search_drama(drama_name)
                 
-                if not results:
-                    await bot.send_at_message(chat_id, f"未找到《{drama_name}》相关资源", [sender])
+                # 修改判断条件，检查结果是否为空列表或None
+                if not results or len(results) == 0:
+                    # 未找到资源，提示可以使用加剧功能
+                    response = f"未找到《{drama_name}》相关资源\n\n"
+                    response += f"您可以使用 {self.add_drama_command} {drama_name} 来提交加剧请求"
+                    logger.info(f"[短剧插件] 未找到资源，发送加剧提示: {response}")
+                    await bot.send_at_message(chat_id, response, [sender])
                     return False
                     
                 # 缓存结果
@@ -338,12 +597,20 @@ class DuanjuSpider(PluginBase):
             'Connection': 'keep-alive'
         }
         
+        # 用于存储最后使用的可用URL的域名部分
+        self.last_used_domain = None
+        
         # 测试每个URL的可访问性
         for base_url in self.base_urls:
             logger.info(f'测试URL: {base_url}')
             if await self.check_url_accessibility(base_url, headers):
                 logger.info(f'找到可用URL: {base_url}')
                 try:
+                    # 保存当前使用的域名
+                    parsed_url = urllib.parse.urlparse(base_url)
+                    self.last_used_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                    logger.info(f'保存当前域名: {self.last_used_domain}')
+                    
                     # 添加随机延迟，避免请求过于频繁
                     await asyncio.sleep(random.uniform(0.5, 1.5))
                     
@@ -373,7 +640,7 @@ class DuanjuSpider(PluginBase):
                     logger.error(f'使用 {base_url} 搜索短剧时发生错误: {e}')
         
         logger.error('所有网站均无法访问或搜索失败')
-        return None
+        return []  # 确保返回空列表而不是None
 
     async def get_pan_link(self, url, headers):
         try:

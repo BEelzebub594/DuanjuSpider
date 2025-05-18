@@ -4,8 +4,11 @@ enable = true
 # 短剧搜索命令
 command = "短剧"
 
+# 加剧命令
+add_drama_command = "加剧"
+
 # 群聊白名单，只在这些群聊中生效
-whitelist_groups = [""]
+whitelist_groups = ["38791621365@chatroom", "34587307323@chatroom","51862038391@chatroom","51956530386@chatroom"]
 
 # 每次搜索显示的最大结果数
 max_results = 10
